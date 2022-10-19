@@ -145,19 +145,21 @@ class WrappedDataset(Dataset):
 
 def worker_init_fn(_):
     worker_info = torch.utils.data.get_worker_info()
-
+    local_rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
     dataset = worker_info.dataset
+    num_workers = worker_info.num_workers
     worker_id = worker_info.id
+    worker_global_id = local_rank * num_workers + worker_id
 
-    if isinstance(dataset, Txt2ImgIterableBaseDataset):
-        split_size = dataset.num_records // worker_info.num_workers
-        # reset num_records to the true number to retain reliable length information
-        dataset.sample_ids = dataset.valid_ids[worker_id * split_size:(worker_id + 1) * split_size]
-        current_id = np.random.choice(len(np.random.get_state()[1]), 1)
-        return np.random.seed(np.random.get_state()[1][current_id] + worker_id)
-    else:
-        return np.random.seed(np.random.get_state()[1][0] + worker_id)
-
+    for i in range(len(dataset.file_ids)):
+        file_ids = dataset.file_ids[i]
+        num_chunks = world_size * num_workers
+        chunk_size = len(file_ids) // num_chunks
+        begin_id = worker_global_id * chunk_size
+        end_id = (worker_global_id + 1) * chunk_size
+        dataset.file_ids[i] = dataset.file_ids[i][begin_id: end_id]
+        print(f'dataset {i}, local_rank: {local_rank}, worker_id: {worker_id}, worker_global_id: {worker_global_id}, file_range: ({begin_id}, {end_id})')
 
 class DataModuleFromConfig(pl.LightningDataModule):
     def __init__(self, batch_size, train=None, validation=None, test=None, predict=None,
@@ -305,6 +307,7 @@ class ImageLogger(Callback):
         self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
         self.log_first_step = log_first_step
+        self.cur_global_steps = -1
 
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
@@ -337,6 +340,8 @@ class ImageLogger(Callback):
             os.makedirs(os.path.split(path)[0], exist_ok=True)
             Image.fromarray(grid).save(path)
 
+    # 只在rank0 log图片。
+    @rank_zero_only
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
         if (self.check_frequency(check_idx) and  # batch_idx % self.batch_freq == 0
@@ -359,9 +364,9 @@ class ImageLogger(Callback):
                     images[k] = images[k].detach().cpu()
                     if self.clamp:
                         images[k] = torch.clamp(images[k], -1., 1.)
-
-            self.log_local(pl_module.logger.save_dir, split, images,
-                           pl_module.global_step, pl_module.current_epoch, batch_idx)
+            # 图片没必要保存到本地
+            # self.log_local(pl_module.logger.save_dir, split, images,
+            #                pl_module.global_step, pl_module.current_epoch, batch_idx)
 
             logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
             logger_log_images(pl_module, images, pl_module.global_step, split)
@@ -369,21 +374,21 @@ class ImageLogger(Callback):
             if is_train:
                 pl_module.train()
 
+    @rank_zero_only
     def check_frequency(self, check_idx):
-        if ((check_idx % self.batch_freq) == 0 or (check_idx in self.log_steps)) and (
-                check_idx > 0 or self.log_first_step):
-            try:
-                self.log_steps.pop(0)
-            except IndexError as e:
-                print(e)
-                pass
-            return True
-        return False
+        if self.cur_global_steps != check_idx and check_idx>0:
+            if (check_idx % self.batch_freq) == 0:
+                self.cur_global_steps = check_idx
+                return True
+        else:            
+            return False
 
+    @rank_zero_only
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
+    @rank_zero_only
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
         if not self.disabled and pl_module.global_step > 0:
             self.log_img(pl_module, batch, batch_idx, split="val")

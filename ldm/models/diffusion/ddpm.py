@@ -5,7 +5,7 @@ https://github.com/openai/improved-diffusion/blob/e94489283bb876ac1477d5dd7709bb
 https://github.com/CompVis/taming-transformers
 -- merci
 """
-
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -330,7 +330,8 @@ class DDPM(pl.LightningModule):
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]
-        x = rearrange(x, 'b h w c -> b c h w')
+        # 已经是 bchw了。
+        # x = rearrange(x, 'b h w c -> b c h w')
         x = x.to(memory_format=torch.contiguous_format).float()
         return x
 
@@ -467,6 +468,15 @@ class LatentDiffusion(DDPM):
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys)
             self.restarted_from_ckpt = True
+
+        # 保存pretrain初始化使用的权重
+        os.makedirs("./init_weights", exist_ok=True)
+        torch.save(self.model.diffusion_model.state_dict(), "init_weights/unet.pt")
+        torch.save(self.first_stage_model.state_dict(), "init_weights/vqae.pt")
+        if cond_stage_trainable:
+            print("cond_stage可以训练，权重文件已保存。")
+            torch.save(self.cond_stage_model.state_dict(), "init_weights/ldmbert.pt")
+        print("初始化的权重已经保存到了init_weights文件夹。")
 
     def make_cond_schedule(self, ):
         self.cond_ids = torch.full(size=(self.num_timesteps,), fill_value=self.num_timesteps - 1, dtype=torch.long)
@@ -1262,7 +1272,7 @@ class LatentDiffusion(DDPM):
                                            bs=N)
         N = min(x.shape[0], N)
         n_row = min(x.shape[0], n_row)
-        log["inputs"] = x
+        # log["inputs"] = x
         log["reconstruction"] = xrec
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
@@ -1299,12 +1309,22 @@ class LatentDiffusion(DDPM):
 
         if sample:
             # get denoise row
+            # guidance = 1.0
             with self.ema_scope("Plotting"):
                 samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
-                                                         ddim_steps=ddim_steps,eta=ddim_eta)
+                                                         ddim_steps=ddim_steps, eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples)
-            log["samples"] = x_samples
+            log["ddim-samples-1.0"] = x_samples
+
+            # guidance = 7.5
+            uc = self.get_learned_conditioning(N * [""])
+            with self.ema_scope("Plotting"):
+                samples, z_denoise_row = self.sample_log(cond=c,batch_size=N,ddim=use_ddim,
+                                                         ddim_steps=ddim_steps, eta=ddim_eta, unconditional_guidance_scale=7.5, unconditional_conditioning=uc)
+            x_samples = self.decode_first_stage(samples)
+            log["ddim-samples-7.5"] = x_samples
+
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)
                 log["denoise_row"] = denoise_grid

@@ -1,0 +1,1 @@
+python main.py --base configs/latent-diffusion/text2img_L12H768_unet800M.yaml -t --gpus 0,1,2,3,4,5,6,7
