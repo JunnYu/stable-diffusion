@@ -715,7 +715,7 @@ if __name__ == "__main__":
         "--unet_checkpoint_path", default="init_weights/unet.pt", type=str, required=False, help="Path to the checkpoint to convert."
     )
     parser.add_argument(
-        "--vae_checkpoint_path", default="init_weights/vqae.pt", type=str, required=False, help="Path to the checkpoint to convert."
+        "--vae_checkpoint_path", default="init_weights/vqvae.pt", type=str, required=False, help="Path to the checkpoint to convert."
     )
     parser.add_argument(
         "--original_config_file",
