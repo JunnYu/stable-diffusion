@@ -1,0 +1,1 @@
+wget https://paddlenlp.bj.bcebos.com/models/community/CompVis/data/part-00001.gz

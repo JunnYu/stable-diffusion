@@ -4,6 +4,7 @@ import time
 import torch
 import torchvision
 import pytorch_lightning as pl
+import torch.distributed as dist
 
 from packaging import version
 from omegaconf import OmegaConf
@@ -18,8 +19,8 @@ from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
 from ldm.data.base import Txt2ImgIterableBaseDataset
+from ldm.data.text_image_pair import TextImagePair, IterableDataset
 from ldm.util import instantiate_from_config
-
 
 def get_parser(**parser_kwargs):
     def str2bool(v):
@@ -155,6 +156,26 @@ def worker_init_fn(_):
         dataset.sample_ids = dataset.valid_ids[worker_id * split_size:(worker_id + 1) * split_size]
         current_id = np.random.choice(len(np.random.get_state()[1]), 1)
         return np.random.seed(np.random.get_state()[1][current_id] + worker_id)
+
+    elif isinstance(dataset, TextImagePair):
+        local_rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        num_workers = worker_info.num_workers
+        worker_id = worker_info.id
+        worker_global_id = local_rank * num_workers + worker_id
+        
+        dataset.rng = np.random.RandomState(worker_global_id)
+        for i in range(len(dataset.file_ids)):
+
+            file_ids = dataset.file_ids[i]
+            num_chunks = world_size * num_workers
+            chunk_size = len(file_ids) // num_chunks
+
+            begin_id = worker_global_id * chunk_size
+            end_id = (worker_global_id + 1) * chunk_size
+            dataset.file_ids[i] = dataset.file_ids[i][begin_id: end_id]
+            print(f'dataset {i}, local_rank: {local_rank}, worker_id: {worker_id}, worker_global_id: {worker_global_id}, file_range: ({begin_id}, {end_id})')
+        return np.random.seed(np.random.get_state()[1][0] + worker_id)
     else:
         return np.random.seed(np.random.get_state()[1][0] + worker_id)
 
@@ -195,7 +216,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                 self.datasets[k] = WrappedDataset(self.datasets[k])
 
     def _train_dataloader(self):
-        is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(self.datasets['train'], (Txt2ImgIterableBaseDataset, IterableDataset))
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
